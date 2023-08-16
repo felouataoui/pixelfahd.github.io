@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta content="width=device-width" name="viewport">
+    <title>Exploring GameplayKit's integration with SpriteKit</title>
+</head>
+<body>
+<header>
+    <a href="../index.html">⬅️</a> | <b>Hi, I'm Fahd 👋</b>
+</header>
+<h1>Exploring GameplayKit's integration with SpriteKit</h1>
+<article>
+    <p>
+        In this article I will explore clean integration strategies between SpriteKit and GameplayKit. Any comments or
+        feedback are welcome. There is a Twitter thread, or you can just send me an <a href="mailto:pixelfahd.contact@gmail.com">email</a>.
+    </p>
+
+    <h2><u>Introduction</u></h2>
+    <p>
+        Deciding on the technologies for your iOS game can be daunting. Especially when you're just starting, and want
+        to keep your options open while still coming to grips with XCode, Swift and the whole Apple technology stack.
+    </p>
+    <p>
+        To tell you the truth, I've been struggling with this exact problem myself. Do I use SpriteKit? GameplayKit? I
+        heard GameplayKit's performance wasn't great, should I roll my own ECS? Should I use an existing one? What if
+        the maintainer stops working on it? Should I even use an ECS? Screw it, I'll just use Unity! Should I use Unity?
+        Learning it is going to take a lot of effort, and UI Toolkit sucks compared to SwiftUI anyway. What if something
+        doesn't work well? I want to understand what my game's engine is doing goddamnit!
+    </p>
+    <p>
+        In this exploration article I want to take the first step in untangling this jungle of possibilities. I am going
+        to assume that I'm working with the default Apple stack (GameplayKit, SpriteKit, SwiftUI) and focus on
+        strategies to build a clean game architecture using those technologies. I'll talk about why I chose to go with
+        the default Apple stack instead of Unity or a different game engine in a future article.
+    </p>
+
+    <h2><u>The problem</u></h2>
+    <p>
+        Stated clearly, I want to make a game using SpriteKit as the rendering framework, and GameplayKit for
+        representing my game world. And I want to tackle the following questions:
+    </p>
+    <ul>
+        <li>What are my options for integrating these two technologies together?</li>
+        <li>Which architecture allows me the most flexibility if I want to easily switch between SpriteKit and a
+            different rendering engine down the line? Like pure Metal for example.
+        </li>
+        <li>What is the performance impact of each option? How does it compare to straight SpriteKit?</li>
+    </ul>
+    <h2><u>Considering my options</u></h2>
+    <aside>
+        <hr>
+        ✋ I am making the choice here to only use vanilla GameplayKit with no enhancements. While it is inefficient and
+        will probably hurt performance, I want this entry to concentrate only on the integration issue. I will dedicate
+        a future exploration article to ECS/GameplayKit and iterate from there to home-in on the best overall solution.
+        That being said, I am also using the more popular flavour of ECS in which components only hold data and all
+        behaviour is handled by component systems. This is to allow for more flexibility if I want to go with a
+        different ECS down the line.
+        <hr>
+    </aside>
+    <p>
+        First let's start with a static view of the simulation without any integration concerns. This will act as a sort
+        of baseline for other strategies:
+    </p>
+    <img alt="Static view of the baseline model" sizes="(max-width: 800px) 100vw, 800px"
+         src="../images/dskagk_0.jpg" srcset="../images/dskagk_0.jpg 1648w">
+    <p>
+        The dashed arrow between <code>GKEntity 1</code> and <code>SKNode 1</code> is the heart of our subject. When an
+        entity changes or is destroyed, how do we apply that change to the corresponding <code>SKNode</code>? And even
+        before that, when we add a new entity to the game world how do we create and configure a corresponding node?
+    </p>
+
+    <h3>Strategy 1: The Front-door</h3>
+    <p>
+        Because components are the data bags of entities, a straightforward solution is to create an <code>SKRenderComponent</code>
+        to hold a reference to the <code>SKNode</code> and an <code>SKRenderComponentSystem</code> that holds a
+        reference to the <code>SKScene</code> and handles creating, updating and destroying nodes:
+    </p>
+    <ul>
+        <li>When a component is added to the rendering system: The underlying node is added to the scene.</li>
+        <li>When a component is removed from the rendering system: The underlying node is removed from the scene.</li>
+        <li>Every update cycle, the rendering system uses the <code>PositionComponent</code> data to update the node's
+            position.
+        </li>
+    </ul>
+    <p>
+        It would look like this:
+    </p>
+    <img alt="Static view of the front-door strategy" sizes="(max-width: 800px) 100vw, 800px"
+         src="../images/dskagk_1.jpg" srcset="../images/dskagk_1.jpg 1734w">
+    <p>
+        The main benefit of this approach is that it's easy to reason about. The rendering system queries other
+        components and only updates the component type it is responsible for. That being said, consider how you would
+        create a new entity. It will probably look something like:
+    </p>
+    <code>
+        // During initialization<br>
+        let entity = GKEntity()<br>
+        entity.addComponent(PositionComponent(CGPoint(x: 0, y: 0)))<br>
+        entity.addComponent(MovementComponent(direction: CGPoint(x: 1, y: 1), speed: 50))<br>
+        entity.addComponent(SKRenderComponent(node: SKShapeNode(circleOfRadius: 50)))<br>
+        <br>
+        // When the rendering system is ready<br>
+        let renderingSystem: GKComponentSystem&lt;SKRenderComponent&gt; = SKRenderComponentSystem()<br>
+        renderingSystem.addComponent(foundIn: entity)<br>
+        <br>
+        // During an update cycle<br>
+        renderingSystem.update()
+    </code>
+    <p>
+        Swift does not support covariant generic types, so we can't define the component system as a generic
+        <code>GKComponentSystem&lt;GKComponent&gt;</code>, we need to specifically reference a
+        <code>GKComponentSystem&lt;SKRenderComponent&gt;</code>.
+    </p>
+    <p>
+        Furthermore, we need to use the SpriteKit-specific component whenever we initialize an entity that needs to be
+        rendered. In order to swap to a different rendering engine with this approach, we would have to
+        change a lot of entity initialization code and even then we wouldn't be able to freely swap rendering engines
+        because of the covariance issue.
+    </p>
+    <p>
+        There are ways to improve this though:
+    </p>
+    <ul>
+        <li>We could define a <code>RenderComponent</code> protocol to be able to reference any
+            <code>GKComponentSystem&lt;RenderComponent&gt;</code>
+            as a rendering system. This allows us to simply pass such a rendering system to the game world and not care
+            about the specific implementation.
+        </li>
+        <li>Instead of the game world creating the <code>SKRenderComponent</code> it could ask the rendering system to
+            provide one given a generic <code>Node</code> definition. This does get complicated though, as the rendering
+            system would need to be available to the game world before the scene is ready. Not the end of the world,
+            but it means the <code>SKScene</code> reference held by the rendering system will need to be made optional.
+        </li>
+    </ul>
+    <a href="https://github.com/pixelfahd/SpriteKitGameplayKitDecoupled/tree/main/DecouplingStrategy1">Here is an
+        example project that implements this strategy</a>
+
+    <h3>Strategy 2: The Backdoor</h3>
+    <p>
+        Building on the idea of a generic <code>Node</code> definition, what if instead of using an engine-specific
+        <code>SKRenderComponent</code> we instead used a more abstract <code>RenderComponent</code> that stored a
+        <code>Node</code> definition for the rendering system to then use? The covariance issue would be eliminated as
+        all rendering systems would handle the same <code>RenderComponent</code>. And on top of that we don't have to
+        know anything engine-specific about the node when creating the entity. <i>*chef's kiss*</i>
+    </p>
+    <p>
+        But wait... how does the rendering system know which node to update? Well that's where the "backdoor" part
+        comes-in. When the <code>addComponent</code> method is called on the rendering system, we will create the node, attach it
+        to the scene and inject a reference back into the entity. Either directly in the <code>RenderComponent</code> or
+        using a separate component like our good old friend <code>SKRenderComponent</code> or SpriteKit's own
+        <code>GKSKNodeComponent</code>. <i>*actual chef's kiss*</i>
+    </p>
+    <p>
+        Enough talk, here is the static view for this strategy:
+    </p>
+    <img sizes="(max-width: 800px) 100vw, 800px" src="../images/dskagk_2.jpg" srcset="../images/dskagk_2.jpg 1912w">
+    <p>
+        And usage would look like this:
+    </p>
+    <code>
+        // During initialization<br>
+        let entity = GKEntity()<br>
+        entity.addComponent(PositionComponent(CGPoint(x: 0, y: 0)))<br>
+        entity.addComponent(MovementComponent(direction: CGPoint(x: 1, y: 1), speed: 50))<br>
+        entity.addComponent(RenderComponent(node: Circle(ofRadius: 50)))<br>
+        <br>
+        // When the rendering system is ready<br>
+        let renderingSystem: GKComponentSystem&lt;RenderComponent&gt; = SKRenderComponentSystem()<br>
+        renderingSystem.addComponent(foundIn: entity)<br>
+        <br>
+        // During an update cycle<br>
+        renderingSystem.update()
+    </code>
+    <p>
+        This has a nice side-benefit I didn't discuss in the previous strategy, which is that other component systems
+        can now query the <code>RenderComponent</code> in an engine-agnostic way.
+    </p>
+    <p>
+        With this approach swapping the rendering engine is just a matter of passing a different instance of
+        <code>GKComponentSystem&lt;RenderComponent&gt;</code> to the game world, there is nothing else to do!
+    </p>
+    <a href="https://github.com/pixelfahd/SpriteKitGameplayKitDecoupled/tree/main/DecouplingStrategy2">Here is an
+        example project that implements this strategy</a>
+
+    <br>
+    <br>
+    <aside>
+        <hr>
+        🤔 So far these are the strategies I could come-with that don't involve extending or improving GameplayKit in
+        any way. If you can think of something else please let me know!
+        <hr>
+    </aside>
+
+    <h2><u>Performance analysis</u></h2>
+    <p>
+        In order to test the performance of both strategies (and a SpriteKit-only solution for reference), I ran the
+        following simulation:
+    </p>
+    <ul>
+        <li>Spawn a number of circles of varying radii around the center of the scene</li>
+        <li>Move each sprite in a random direction at a random speed</li>
+    </ul>
+    <p>
+        On an iPhone 14 Pro I got the same results for all strategies. 60fps up to 1000 entities, 30fps at 2000 entities
+        and 15fps at 4000 entities.
+    </p>
+    <p>
+        Doing a cursory time-complexity analysis (as far as I know, we don't have access to the implementation details
+        of GameplayKit, especially around caching). I found the following:
+    </p>
+    <ul>
+        <li>SpriteKit-only: O(n) with n the number of nodes. This is inline with the results above.</li>
+        <li>Strategy 1 & 2: O(K*n) with n the number of entities, and K a factor that depends on the number of
+            components per entity, the number of queried components per cycle as well as the implementation details
+            of GameplayKit.
+        </li>
+    </ul>
+    <p>
+        With this knowledge I was able to stress the system simply by adding more dummy components to the entities, and
+        making sure they were queried and used (to avoid any optimization paths) by the rendering system. The results
+        weren't straightforward to understand and I suspect GameplayKit is trying hard to optimize what it can, but I
+        did notice a degradation in performance as I added components. On the same iPhone 14 Pro, at 1000 entities I
+        got 60fps for 3 components, 45fps for 8 components queried by only one system and 40fps for 8 components queried
+        by 2 systems. Strangely querying more components in the same system didn't lead to much more degradation?
+    </p>
+    <p>
+        In any case, I got enough information from this to move forward, and I'll do a more in-depth analysis once I
+        get to exploring GameplayKit itself and the ECS part of the architecture.
+    </p>
+
+    <h2><u>Conclusion</u></h2>
+    <p>
+        The 2nd "Backdoor" strategy seems to fit the requirements quite nicely. The API for creating entities is clean with no
+        rendering engine specific concepts, and swapping a different engine is just a matter of wrapping it in a
+        <code>GKComponentSystem&lt;RenderComponent&gt;</code> and passing it to the game world.
+    </p>
+    <p>
+        The caveat with both strategies though is that GameplayKit's implementation of ECS does not scale well with the
+        number of components in an entity. My next objective is to explore how GameplayKit can be improved (or
+        replaced?) in order to have a clean and performant overall architecture.
+    </p>
+</article>
+<footer>
+    <a href="../index.html">⬅️</a>
+</footer>
+</body>
+</html>
